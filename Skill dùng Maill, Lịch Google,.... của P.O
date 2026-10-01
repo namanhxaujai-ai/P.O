@@ -1,1 +1,889 @@
+/**
+ * ============================================================
+ *  GOOGLE AI WORKSPACE MANAGER
+ *  Mục đích: Cho phép AI truy cập URL và quản lý toàn bộ
+ *  ứng dụng Google Workspace thông qua một hệ thống thống nhất
+ * ============================================================
+ *
+ *  📦 CÁC APP ĐƯỢC QUẢN LÝ:
+ *  ├── 1. Gmail              - Đọc, gửi, tổ chức email
+ *  ├── 2. Google Drive       - Tạo, đọc, xóa, chia sẻ file/folder
+ *  ├── 3. Google Sheets      - Đọc/ghi dữ liệu bảng tính
+ *  ├── 4. Google Docs        - Tạo và chỉnh sửa tài liệu
+ *  ├── 5. Google Calendar    - Quản lý sự kiện, lịch họp
+ *  ├── 6. Google Slides      - Tạo và quản lý bài thuyết trình
+ *  ├── 7. Google Forms       - Tạo form, đọc phản hồi
+ *  ├── 8. Google Contacts    - Quản lý danh bạ
+ *  ├── 9. Google Sites       - Quản lý trang web nội bộ
+ *  ├── 10. Google Chat/Meet  - Gửi thông báo Webhook
+ *  ├── 11. Google Tasks      - Quản lý công việc
+ *  ├── 12. URL Fetch         - Truy cập bất kỳ URL nào (AI proxy)
+ *  └── 13. Properties Store  - Lưu trạng thái AI giữa các phiên
+ * ============================================================
+ */
 
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  ⚙️  CẤU HÌNH TOÀN CỤC
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const CONFIG = {
+  AI_API_KEY:      PropertiesService.getScriptProperties().getProperty('AI_API_KEY')      || '',
+  AI_ENDPOINT:     PropertiesService.getScriptProperties().getProperty('AI_ENDPOINT')     || 'https://api.anthropic.com/v1/messages',
+  WEBHOOK_CHAT:    PropertiesService.getScriptProperties().getProperty('WEBHOOK_CHAT')    || '',
+  LOG_SHEET_NAME:  'AI_Activity_Log',
+  MAX_EMAIL_FETCH: 20,
+};
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🌐  ĐIỂM VÀO: doPost — Nhận lệnh từ AI qua HTTP
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Endpoint chính. Deploy as "Web App" → Execute as Me → Anyone.
+ * AI gửi POST với body JSON: { "action": "...", "params": {...} }
+ */
+function doPost(e) {
+  try {
+    const body    = JSON.parse(e.postData.contents);
+    const action  = body.action;
+    const params  = body.params || {};
+
+    _log('CALL', action, params);
+
+    const result = _dispatch(action, params);
+    return _json({ ok: true, result });
+
+  } catch (err) {
+    _log('ERROR', '', { message: err.message });
+    return _json({ ok: false, error: err.message });
+  }
+}
+
+/** Cho phép GET kiểm tra trạng thái */
+function doGet(e) {
+  const cmd = (e && e.parameter && e.parameter.cmd) ? e.parameter.cmd : 'status';
+  if (cmd === 'status') {
+    return _json({ ok: true, service: 'Google AI Workspace Manager', version: '2.0' });
+  }
+  return _json({ ok: false, error: 'Unknown GET command' });
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🔀  DISPATCHER — Map action → handler
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _dispatch(action, params) {
+  const ROUTES = {
+    // ── URL Fetch (AI Proxy) ────────────────────────
+    'url.fetch':              () => urlFetch(params),
+    'url.fetchJson':          () => urlFetchJson(params),
+
+    // ── Gmail ───────────────────────────────────────
+    'gmail.listEmails':       () => gmailListEmails(params),
+    'gmail.readEmail':        () => gmailReadEmail(params),
+    'gmail.sendEmail':        () => gmailSendEmail(params),
+    'gmail.replyEmail':       () => gmailReplyEmail(params),
+    'gmail.searchEmails':     () => gmailSearchEmails(params),
+    'gmail.labelEmail':       () => gmailLabelEmail(params),
+    'gmail.trashEmail':       () => gmailTrashEmail(params),
+    'gmail.createDraft':      () => gmailCreateDraft(params),
+    'gmail.listLabels':       () => gmailListLabels(params),
+
+    // ── Google Drive ────────────────────────────────
+    'drive.listFiles':        () => driveListFiles(params),
+    'drive.readFile':         () => driveReadFile(params),
+    'drive.createFile':       () => driveCreateFile(params),
+    'drive.updateFile':       () => driveUpdateFile(params),
+    'drive.deleteFile':       () => driveDeleteFile(params),
+    'drive.shareFile':        () => driveShareFile(params),
+    'drive.createFolder':     () => driveCreateFolder(params),
+    'drive.searchFiles':      () => driveSearchFiles(params),
+    'drive.moveFile':         () => driveMoveFile(params),
+    'drive.getFileInfo':      () => driveGetFileInfo(params),
+
+    // ── Google Sheets ───────────────────────────────
+    'sheets.readRange':       () => sheetsReadRange(params),
+    'sheets.writeRange':      () => sheetsWriteRange(params),
+    'sheets.appendRow':       () => sheetsAppendRow(params),
+    'sheets.clearRange':      () => sheetsClearRange(params),
+    'sheets.createSheet':     () => sheetsCreateSheet(params),
+    'sheets.listSheets':      () => sheetsListSheets(params),
+    'sheets.getSheetInfo':    () => sheetsGetSheetInfo(params),
+    'sheets.deleteRow':       () => sheetsDeleteRow(params),
+    'sheets.formatRange':     () => sheetsFormatRange(params),
+
+    // ── Google Docs ─────────────────────────────────
+    'docs.create':            () => docsCreate(params),
+    'docs.read':              () => docsRead(params),
+    'docs.appendText':        () => docsAppendText(params),
+    'docs.replaceText':       () => docsReplaceText(params),
+    'docs.getInfo':           () => docsGetInfo(params),
+    'docs.addTable':          () => docsAddTable(params),
+
+    // ── Google Calendar ─────────────────────────────
+    'calendar.listEvents':    () => calendarListEvents(params),
+    'calendar.createEvent':   () => calendarCreateEvent(params),
+    'calendar.updateEvent':   () => calendarUpdateEvent(params),
+    'calendar.deleteEvent':   () => calendarDeleteEvent(params),
+    'calendar.getEvent':      () => calendarGetEvent(params),
+    'calendar.listCalendars': () => calendarListCalendars(params),
+    'calendar.findFreeTime':  () => calendarFindFreeTime(params),
+
+    // ── Google Slides ───────────────────────────────
+    'slides.create':          () => slidesCreate(params),
+    'slides.read':            () => slidesRead(params),
+    'slides.addSlide':        () => slidesAddSlide(params),
+    'slides.replaceText':     () => slidesReplaceText(params),
+    'slides.getInfo':         () => slidesGetInfo(params),
+
+    // ── Google Forms ────────────────────────────────
+    'forms.create':           () => formsCreate(params),
+    'forms.getResponses':     () => formsGetResponses(params),
+    'forms.addQuestion':      () => formsAddQuestion(params),
+    'forms.getInfo':          () => formsGetInfo(params),
+
+    // ── Google Contacts ─────────────────────────────
+    'contacts.list':          () => contactsList(params),
+    'contacts.search':        () => contactsSearch(params),
+    'contacts.create':        () => contactsCreate(params),
+    'contacts.update':        () => contactsUpdate(params),
+    'contacts.delete':        () => contactsDelete(params),
+
+    // ── Google Chat / Meet ──────────────────────────
+    'chat.sendWebhook':       () => chatSendWebhook(params),
+    'chat.sendCardWebhook':   () => chatSendCardWebhook(params),
+
+    // ── Google Tasks ────────────────────────────────
+    'tasks.listTasklists':    () => tasksListTasklists(params),
+    'tasks.listTasks':        () => tasksListTasks(params),
+    'tasks.createTask':       () => tasksCreateTask(params),
+    'tasks.completeTask':     () => tasksCompleteTask(params),
+    'tasks.deleteTask':       () => tasksDeleteTask(params),
+
+    // ── Properties / AI State ───────────────────────
+    'props.get':              () => propsGet(params),
+    'props.set':              () => propsSet(params),
+    'props.delete':           () => propsDelete(params),
+    'props.listAll':          () => propsListAll(params),
+
+    // ── Hệ thống ────────────────────────────────────
+    'system.log':             () => systemGetLog(params),
+    'system.listRoutes':      () => ({ routes: Object.keys(ROUTES) }),
+  };
+
+  if (!ROUTES[action]) throw new Error('Action not found: ' + action);
+  return ROUTES[action]();
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🌐  1. URL FETCH — AI Proxy truy cập mọi URL
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function urlFetch({ url, method = 'GET', headers = {}, payload = null, muteHttpExceptions = true }) {
+  if (!url) throw new Error('url required');
+  const options = { method, headers, muteHttpExceptions };
+  if (payload) options.payload = typeof payload === 'object' ? JSON.stringify(payload) : payload;
+  const response = UrlFetchApp.fetch(url, options);
+  return {
+    statusCode:   response.getResponseCode(),
+    headers:      response.getHeaders(),
+    body:         response.getContentText(),
+  };
+}
+
+function urlFetchJson({ url, method = 'GET', headers = {}, payload = null }) {
+  headers['Accept']       = 'application/json';
+  headers['Content-Type'] = 'application/json';
+  const res = urlFetch({ url, method, headers, payload });
+  try { res.json = JSON.parse(res.body); } catch (_) {}
+  return res;
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📧  2. GMAIL
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function gmailListEmails({ maxResults = 10, labelIds = ['INBOX'] }) {
+  const threads = GmailApp.getInboxThreads(0, Math.min(maxResults, CONFIG.MAX_EMAIL_FETCH));
+  return threads.map(t => {
+    const msg = t.getMessages()[0];
+    return {
+      threadId: t.getId(),
+      subject:  t.getFirstMessageSubject(),
+      from:     msg.getFrom(),
+      date:     msg.getDate().toISOString(),
+      snippet:  t.getMessages().slice(-1)[0].getPlainBody().substring(0, 200),
+      unread:   t.isUnread(),
+    };
+  });
+}
+
+function gmailReadEmail({ threadId, messageId }) {
+  if (messageId) {
+    const msg = GmailApp.getMessageById(messageId);
+    return { from: msg.getFrom(), to: msg.getTo(), subject: msg.getSubject(),
+             date: msg.getDate().toISOString(), body: msg.getPlainBody(),
+             htmlBody: msg.getBody(), attachments: msg.getAttachments().map(a => a.getName()) };
+  }
+  const thread = GmailApp.getThreadById(threadId);
+  return thread.getMessages().map(msg => ({
+    id: msg.getId(), from: msg.getFrom(), to: msg.getTo(),
+    subject: msg.getSubject(), date: msg.getDate().toISOString(),
+    body: msg.getPlainBody().substring(0, 3000),
+  }));
+}
+
+function gmailSendEmail({ to, subject, body, htmlBody, cc, bcc, attachments = [] }) {
+  if (!to || !subject || !body) throw new Error('to, subject, body required');
+  const opts = {};
+  if (htmlBody)  opts.htmlBody   = htmlBody;
+  if (cc)        opts.cc         = cc;
+  if (bcc)       opts.bcc        = bcc;
+  GmailApp.sendEmail(to, subject, body, opts);
+  return { sent: true, to, subject };
+}
+
+function gmailReplyEmail({ threadId, body, htmlBody }) {
+  const thread = GmailApp.getThreadById(threadId);
+  const opts = htmlBody ? { htmlBody } : {};
+  thread.reply(body, opts);
+  return { replied: true, threadId };
+}
+
+function gmailSearchEmails({ query, maxResults = 10 }) {
+  if (!query) throw new Error('query required');
+  const threads = GmailApp.search(query, 0, maxResults);
+  return threads.map(t => ({
+    threadId: t.getId(), subject: t.getFirstMessageSubject(),
+    messageCount: t.getMessageCount(), lastDate: t.getLastMessageDate().toISOString(),
+  }));
+}
+
+function gmailLabelEmail({ threadId, labelName, create = false }) {
+  let label = GmailApp.getUserLabelByName(labelName);
+  if (!label && create) label = GmailApp.createLabel(labelName);
+  if (!label) throw new Error('Label not found: ' + labelName);
+  GmailApp.getThreadById(threadId).addLabel(label);
+  return { labeled: true };
+}
+
+function gmailTrashEmail({ threadId }) {
+  GmailApp.getThreadById(threadId).moveToTrash();
+  return { trashed: true };
+}
+
+function gmailCreateDraft({ to, subject, body, htmlBody }) {
+  const draft = GmailApp.createDraft(to, subject, body, htmlBody ? { htmlBody } : {});
+  return { draftId: draft.getId() };
+}
+
+function gmailListLabels() {
+  return GmailApp.getUserLabels().map(l => ({ name: l.getName(), id: l.getId() }));
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📁  3. GOOGLE DRIVE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function driveListFiles({ folderId, maxResults = 20 }) {
+  const folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  const files = folder.getFiles();
+  const result = [];
+  let count = 0;
+  while (files.hasNext() && count < maxResults) {
+    const f = files.next();
+    result.push({ id: f.getId(), name: f.getName(), mimeType: f.getMimeType(),
+                  size: f.getSize(), url: f.getUrl(), modifiedDate: f.getLastUpdated().toISOString() });
+    count++;
+  }
+  return result;
+}
+
+function driveReadFile({ fileId }) {
+  const file = DriveApp.getFileById(fileId);
+  const mime = file.getMimeType();
+  if (mime === MimeType.PLAIN_TEXT || mime === 'text/html' || mime === 'text/csv') {
+    return { id: fileId, name: file.getName(), mimeType: mime, content: file.getBlob().getDataAsString() };
+  }
+  return { id: fileId, name: file.getName(), mimeType: mime, note: 'Binary file — use driveDownloadUrl' };
+}
+
+function driveCreateFile({ name, content = '', mimeType = 'text/plain', folderId }) {
+  const blob   = Utilities.newBlob(content, mimeType, name);
+  const folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  const file   = folder.createFile(blob);
+  return { id: file.getId(), name: file.getName(), url: file.getUrl() };
+}
+
+function driveUpdateFile({ fileId, content, mimeType = 'text/plain' }) {
+  const file = DriveApp.getFileById(fileId);
+  file.setContent(content);
+  return { updated: true, id: fileId };
+}
+
+function driveDeleteFile({ fileId }) {
+  DriveApp.getFileById(fileId).setTrashed(true);
+  return { deleted: true };
+}
+
+function driveShareFile({ fileId, email, role = 'reader', type = 'user' }) {
+  const file = DriveApp.getFileById(fileId);
+  if (type === 'anyone') {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } else {
+    file.addViewer(email);
+    if (role === 'editor') file.addEditor(email);
+  }
+  return { shared: true, fileId, email, role };
+}
+
+function driveCreateFolder({ name, parentFolderId }) {
+  const parent = parentFolderId ? DriveApp.getFolderById(parentFolderId) : DriveApp.getRootFolder();
+  const folder = parent.createFolder(name);
+  return { id: folder.getId(), name: folder.getName(), url: folder.getUrl() };
+}
+
+function driveSearchFiles({ query, maxResults = 20 }) {
+  const files  = DriveApp.searchFiles(query);
+  const result = [];
+  let count    = 0;
+  while (files.hasNext() && count < maxResults) {
+    const f = files.next();
+    result.push({ id: f.getId(), name: f.getName(), mimeType: f.getMimeType(), url: f.getUrl() });
+    count++;
+  }
+  return result;
+}
+
+function driveMoveFile({ fileId, targetFolderId }) {
+  const file     = DriveApp.getFileById(fileId);
+  const target   = DriveApp.getFolderById(targetFolderId);
+  const parents  = file.getParents();
+  while (parents.hasNext()) file.removeFromFolder(parents.next());
+  target.addFile(file);
+  return { moved: true };
+}
+
+function driveGetFileInfo({ fileId }) {
+  const f = DriveApp.getFileById(fileId);
+  return { id: f.getId(), name: f.getName(), mimeType: f.getMimeType(),
+           size: f.getSize(), url: f.getUrl(), owner: f.getOwner().getEmail(),
+           createdDate: f.getDateCreated().toISOString(), modifiedDate: f.getLastUpdated().toISOString() };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📊  4. GOOGLE SHEETS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _getSheet(spreadsheetId, sheetName) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  return sheetName ? ss.getSheetByName(sheetName) : ss.getActiveSheet();
+}
+
+function sheetsReadRange({ spreadsheetId, sheetName, range }) {
+  const sheet = _getSheet(spreadsheetId, sheetName);
+  const values = range ? sheet.getRange(range).getValues() : sheet.getDataRange().getValues();
+  return { values, rows: values.length, cols: values[0] ? values[0].length : 0 };
+}
+
+function sheetsWriteRange({ spreadsheetId, sheetName, range, values }) {
+  const sheet = _getSheet(spreadsheetId, sheetName);
+  sheet.getRange(range).setValues(values);
+  return { written: true };
+}
+
+function sheetsAppendRow({ spreadsheetId, sheetName, row }) {
+  const sheet = _getSheet(spreadsheetId, sheetName);
+  sheet.appendRow(row);
+  return { appended: true, lastRow: sheet.getLastRow() };
+}
+
+function sheetsClearRange({ spreadsheetId, sheetName, range }) {
+  const sheet = _getSheet(spreadsheetId, sheetName);
+  if (range) sheet.getRange(range).clearContent();
+  else sheet.clearContents();
+  return { cleared: true };
+}
+
+function sheetsCreateSheet({ spreadsheetId, sheetName }) {
+  const ss    = SpreadsheetApp.openById(spreadsheetId);
+  const sheet = ss.insertSheet(sheetName);
+  return { sheetId: sheet.getSheetId(), name: sheet.getName() };
+}
+
+function sheetsListSheets({ spreadsheetId }) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  return ss.getSheets().map(s => ({ id: s.getSheetId(), name: s.getName(), rows: s.getMaxRows(), cols: s.getMaxColumns() }));
+}
+
+function sheetsGetSheetInfo({ spreadsheetId }) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  return { id: spreadsheetId, name: ss.getName(), url: ss.getUrl(),
+           sheets: ss.getSheets().map(s => s.getName()) };
+}
+
+function sheetsDeleteRow({ spreadsheetId, sheetName, rowIndex }) {
+  const sheet = _getSheet(spreadsheetId, sheetName);
+  sheet.deleteRow(rowIndex);
+  return { deleted: true };
+}
+
+function sheetsFormatRange({ spreadsheetId, sheetName, range, bold, background, fontColor }) {
+  const r = _getSheet(spreadsheetId, sheetName).getRange(range);
+  if (bold !== undefined)  r.setFontWeight(bold ? 'bold' : 'normal');
+  if (background) r.setBackground(background);
+  if (fontColor)  r.setFontColor(fontColor);
+  return { formatted: true };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📝  5. GOOGLE DOCS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function docsCreate({ title, content = '', folderId }) {
+  const doc  = DocumentApp.create(title);
+  if (content) doc.getBody().setText(content);
+  const file = DriveApp.getFileById(doc.getId());
+  if (folderId) {
+    const folder = DriveApp.getFolderById(folderId);
+    const root   = DriveApp.getRootFolder();
+    root.removeFile(file);
+    folder.addFile(file);
+  }
+  doc.saveAndClose();
+  return { id: doc.getId(), title: doc.getName(), url: doc.getUrl() };
+}
+
+function docsRead({ documentId }) {
+  const doc  = DocumentApp.openById(documentId);
+  const body = doc.getBody();
+  return { id: documentId, title: doc.getName(), url: doc.getUrl(),
+           content: body.getText(), paragraphCount: body.getParagraphs().length };
+}
+
+function docsAppendText({ documentId, text, heading }) {
+  const doc  = DocumentApp.openById(documentId);
+  const body = doc.getBody();
+  if (heading) body.appendParagraph(text).setHeading(DocumentApp.ParagraphHeading[heading] || DocumentApp.ParagraphHeading.NORMAL);
+  else body.appendParagraph(text);
+  doc.saveAndClose();
+  return { appended: true };
+}
+
+function docsReplaceText({ documentId, searchText, replacement }) {
+  const doc = DocumentApp.openById(documentId);
+  doc.getBody().replaceText(searchText, replacement);
+  doc.saveAndClose();
+  return { replaced: true };
+}
+
+function docsGetInfo({ documentId }) {
+  const doc = DocumentApp.openById(documentId);
+  return { id: documentId, title: doc.getName(), url: doc.getUrl(),
+           bodyText: doc.getBody().getText().substring(0, 500) };
+}
+
+function docsAddTable({ documentId, rows, columns, data = [] }) {
+  const doc   = DocumentApp.openById(documentId);
+  const body  = doc.getBody();
+  const table = body.appendTable();
+  for (let r = 0; r < rows; r++) {
+    const row = table.appendTableRow();
+    for (let c = 0; c < columns; c++) {
+      row.appendTableCell(data[r] ? String(data[r][c] || '') : '');
+    }
+  }
+  doc.saveAndClose();
+  return { tableAdded: true };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📅  6. GOOGLE CALENDAR
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function calendarListEvents({ calendarId = 'primary', startTime, endTime, maxResults = 20 }) {
+  const cal    = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const start  = startTime ? new Date(startTime) : new Date();
+  const end    = endTime   ? new Date(endTime)   : new Date(start.getTime() + 7 * 24 * 3600000);
+  return cal.getEvents(start, end).slice(0, maxResults).map(ev => ({
+    id: ev.getId(), title: ev.getTitle(), start: ev.getStartTime().toISOString(),
+    end: ev.getEndTime().toISOString(), location: ev.getLocation(), description: ev.getDescription(),
+    guests: ev.getGuestList().map(g => g.getEmail()),
+  }));
+}
+
+function calendarCreateEvent({ title, startTime, endTime, description = '', location = '', guests = [], calendarId = 'primary', sendInvites = true }) {
+  if (!title || !startTime || !endTime) throw new Error('title, startTime, endTime required');
+  const cal  = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const opts = { description, location, sendInvites };
+  if (guests.length) opts.guests = guests.join(',');
+  const ev = cal.createEvent(title, new Date(startTime), new Date(endTime), opts);
+  return { id: ev.getId(), title: ev.getTitle(), start: ev.getStartTime().toISOString() };
+}
+
+function calendarUpdateEvent({ eventId, calendarId = 'primary', title, startTime, endTime, description, location }) {
+  const cal = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const ev  = cal.getEventById(eventId);
+  if (!ev) throw new Error('Event not found');
+  if (title)       ev.setTitle(title);
+  if (description) ev.setDescription(description);
+  if (location)    ev.setLocation(location);
+  if (startTime && endTime) ev.setTime(new Date(startTime), new Date(endTime));
+  return { updated: true, eventId };
+}
+
+function calendarDeleteEvent({ eventId, calendarId = 'primary' }) {
+  const cal = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const ev  = cal.getEventById(eventId);
+  if (!ev) throw new Error('Event not found');
+  ev.deleteEvent();
+  return { deleted: true };
+}
+
+function calendarGetEvent({ eventId, calendarId = 'primary' }) {
+  const cal = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const ev  = cal.getEventById(eventId);
+  if (!ev) throw new Error('Event not found');
+  return { id: ev.getId(), title: ev.getTitle(), start: ev.getStartTime().toISOString(),
+           end: ev.getEndTime().toISOString(), location: ev.getLocation(), description: ev.getDescription() };
+}
+
+function calendarListCalendars() {
+  return CalendarApp.getAllCalendars().map(c => ({
+    id: c.getId(), name: c.getName(), color: c.getColor(), isHidden: c.isHidden(),
+  }));
+}
+
+function calendarFindFreeTime({ startTime, endTime, durationMinutes = 30, calendarId = 'primary' }) {
+  const cal    = calendarId === 'primary' ? CalendarApp.getDefaultCalendar() : CalendarApp.getCalendarById(calendarId);
+  const events = cal.getEvents(new Date(startTime), new Date(endTime));
+  const slots  = [];
+  let cursor   = new Date(startTime);
+  events.forEach(ev => {
+    const s = ev.getStartTime(), e = ev.getEndTime();
+    if ((s - cursor) >= durationMinutes * 60000) slots.push({ from: cursor.toISOString(), to: s.toISOString() });
+    if (e > cursor) cursor = e;
+  });
+  if ((new Date(endTime) - cursor) >= durationMinutes * 60000)
+    slots.push({ from: cursor.toISOString(), to: endTime });
+  return { freeSlots: slots };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🎞️  7. GOOGLE SLIDES
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function slidesCreate({ title }) {
+  const presentation = SlidesApp.create(title);
+  return { id: presentation.getId(), title: presentation.getName(), url: presentation.getUrl() };
+}
+
+function slidesRead({ presentationId }) {
+  const pres   = SlidesApp.openById(presentationId);
+  const slides = pres.getSlides();
+  return {
+    id: presentationId, title: pres.getName(), url: pres.getUrl(),
+    slideCount: slides.length,
+    slides: slides.map((s, i) => ({
+      index: i, id: s.getObjectId(),
+      shapes: s.getShapes().map(sh => ({ type: sh.getShapeType().toString(), text: sh.getText().asString() })),
+    })),
+  };
+}
+
+function slidesAddSlide({ presentationId, layoutIndex = 0, title, body }) {
+  const pres  = SlidesApp.openById(presentationId);
+  const slide = pres.appendSlide(SlidesApp.PredefinedLayout.TITLE_AND_BODY);
+  const ph    = slide.getPlaceholders();
+  if (title && ph[0]) ph[0].asShape().getText().setText(title);
+  if (body  && ph[1]) ph[1].asShape().getText().setText(body);
+  pres.saveAndClose();
+  return { added: true, slideCount: pres.getSlides().length };
+}
+
+function slidesReplaceText({ presentationId, searchText, replacement }) {
+  const pres = SlidesApp.openById(presentationId);
+  pres.getSlides().forEach(s => s.replaceAllText(searchText, replacement));
+  pres.saveAndClose();
+  return { replaced: true };
+}
+
+function slidesGetInfo({ presentationId }) {
+  const pres = SlidesApp.openById(presentationId);
+  return { id: presentationId, title: pres.getName(), url: pres.getUrl(), slideCount: pres.getSlides().length };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📋  8. GOOGLE FORMS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function formsCreate({ title, description = '' }) {
+  const form = FormApp.create(title);
+  if (description) form.setDescription(description);
+  return { id: form.getId(), title: form.getTitle(), url: form.getPublishedUrl(), editUrl: form.getEditUrl() };
+}
+
+function formsGetResponses({ formId, maxResults = 50 }) {
+  const form      = FormApp.openById(formId);
+  const responses = form.getResponses().slice(-maxResults);
+  return responses.map(r => ({
+    id:        r.getId(),
+    timestamp: r.getTimestamp().toISOString(),
+    email:     r.getRespondentEmail(),
+    answers:   r.getItemResponses().map(a => ({
+      question: a.getItem().getTitle(),
+      answer:   a.getResponse(),
+    })),
+  }));
+}
+
+function formsAddQuestion({ formId, questionText, type = 'TEXT', choices = [] }) {
+  const form = FormApp.openById(formId);
+  switch (type.toUpperCase()) {
+    case 'TEXT':       form.addTextItem().setTitle(questionText);                break;
+    case 'PARAGRAPH':  form.addParagraphTextItem().setTitle(questionText);       break;
+    case 'MULTIPLE':   form.addMultipleChoiceItem().setTitle(questionText).setChoiceValues(choices); break;
+    case 'CHECKBOX':   form.addCheckboxItem().setTitle(questionText).setChoiceValues(choices);       break;
+    case 'SCALE':      form.addScaleItem().setTitle(questionText).setBounds(1, 5);                   break;
+    default: throw new Error('Unknown question type: ' + type);
+  }
+  return { added: true, formId };
+}
+
+function formsGetInfo({ formId }) {
+  const form = FormApp.openById(formId);
+  return { id: form.getId(), title: form.getTitle(), description: form.getDescription(),
+           url: form.getPublishedUrl(), responseCount: form.getResponses().length,
+           questionCount: form.getItems().length };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  👤  9. GOOGLE CONTACTS (People API)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _peopleApiCall(path, method = 'GET', payload = null) {
+  const token = ScriptApp.getOAuthToken();
+  const opts  = { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, muteHttpExceptions: true };
+  if (payload) opts.payload = JSON.stringify(payload);
+  const res = UrlFetchApp.fetch('https://people.googleapis.com/v1/' + path, opts);
+  return JSON.parse(res.getContentText());
+}
+
+function contactsList({ pageSize = 20 }) {
+  const data = _peopleApiCall(`people/me/connections?personFields=names,emailAddresses,phoneNumbers&pageSize=${pageSize}`);
+  return (data.connections || []).map(c => ({
+    resourceName: c.resourceName,
+    name:  (c.names || [{}])[0].displayName,
+    email: ((c.emailAddresses || [{}])[0] || {}).value,
+    phone: ((c.phoneNumbers   || [{}])[0] || {}).value,
+  }));
+}
+
+function contactsSearch({ query }) {
+  const data = _peopleApiCall(`people:searchContacts?query=${encodeURIComponent(query)}&readMask=names,emailAddresses,phoneNumbers`);
+  return (data.results || []).map(r => r.person).map(c => ({
+    resourceName: c.resourceName,
+    name:  (c.names || [{}])[0].displayName,
+    email: ((c.emailAddresses || [{}])[0] || {}).value,
+  }));
+}
+
+function contactsCreate({ firstName, lastName, email, phone }) {
+  const body = {
+    names: [{ givenName: firstName, familyName: lastName }],
+    emailAddresses: email ? [{ value: email }] : [],
+    phoneNumbers:   phone ? [{ value: phone }] : [],
+  };
+  const res = _peopleApiCall('people:createContact', 'POST', body);
+  return { resourceName: res.resourceName, name: firstName + ' ' + lastName };
+}
+
+function contactsUpdate({ resourceName, email, phone }) {
+  const current = _peopleApiCall(resourceName + '?personFields=names,emailAddresses,phoneNumbers,metadata');
+  if (email) current.emailAddresses = [{ value: email }];
+  if (phone) current.phoneNumbers   = [{ value: phone }];
+  const etag = encodeURIComponent(resourceName);
+  const res  = _peopleApiCall(`${resourceName}:updateContact?updatePersonFields=emailAddresses,phoneNumbers`, 'PATCH', current);
+  return { updated: true, resourceName };
+}
+
+function contactsDelete({ resourceName }) {
+  _peopleApiCall(resourceName + ':deleteContact', 'DELETE');
+  return { deleted: true };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  💬  10. GOOGLE CHAT / MEET
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function chatSendWebhook({ webhookUrl, text }) {
+  const url = webhookUrl || CONFIG.WEBHOOK_CHAT;
+  if (!url) throw new Error('webhookUrl required');
+  const response = UrlFetchApp.fetch(url, {
+    method: 'POST', contentType: 'application/json',
+    payload: JSON.stringify({ text }),
+  });
+  return { sent: true, status: response.getResponseCode() };
+}
+
+function chatSendCardWebhook({ webhookUrl, title, subtitle, text, imageUrl, buttonText, buttonUrl }) {
+  const url = webhookUrl || CONFIG.WEBHOOK_CHAT;
+  if (!url) throw new Error('webhookUrl required');
+  const card = {
+    cards: [{
+      header: { title, subtitle },
+      sections: [{
+        widgets: [
+          ...(imageUrl  ? [{ image: { imageUrl } }]                                        : []),
+          ...(text      ? [{ textParagraph: { text } }]                                   : []),
+          ...(buttonText ? [{ buttons: [{ textButton: { text: buttonText, onClick: { openLink: { url: buttonUrl } } } }] }] : []),
+        ],
+      }],
+    }],
+  };
+  UrlFetchApp.fetch(url, { method: 'POST', contentType: 'application/json', payload: JSON.stringify(card) });
+  return { sent: true };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  ✅  11. GOOGLE TASKS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _tasksApi(path, method = 'GET', payload = null) {
+  const token = ScriptApp.getOAuthToken();
+  const opts  = { method, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, muteHttpExceptions: true };
+  if (payload) opts.payload = JSON.stringify(payload);
+  return JSON.parse(UrlFetchApp.fetch('https://tasks.googleapis.com/tasks/v1/' + path, opts).getContentText());
+}
+
+function tasksListTasklists() {
+  const data = _tasksApi('users/@me/lists');
+  return (data.items || []).map(l => ({ id: l.id, title: l.title }));
+}
+
+function tasksListTasks({ tasklistId, showCompleted = false }) {
+  const data = _tasksApi(`lists/${tasklistId}/tasks?showCompleted=${showCompleted}`);
+  return (data.items || []).map(t => ({
+    id: t.id, title: t.title, status: t.status, due: t.due, notes: t.notes,
+  }));
+}
+
+function tasksCreateTask({ tasklistId, title, notes = '', due }) {
+  const body = { title, notes };
+  if (due) body.due = new Date(due).toISOString();
+  const task = _tasksApi(`lists/${tasklistId}/tasks`, 'POST', body);
+  return { id: task.id, title: task.title, status: task.status };
+}
+
+function tasksCompleteTask({ tasklistId, taskId }) {
+  _tasksApi(`lists/${tasklistId}/tasks/${taskId}`, 'PATCH', { status: 'completed' });
+  return { completed: true };
+}
+
+function tasksDeleteTask({ tasklistId, taskId }) {
+  _tasksApi(`lists/${tasklistId}/tasks/${taskId}`, 'DELETE');
+  return { deleted: true };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  💾  12. PROPERTIES — Lưu trạng thái AI
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function propsGet({ key, scope = 'script' })   { return { value: _props(scope).getProperty(key) }; }
+function propsSet({ key, value, scope='script' }) { _props(scope).setProperty(key, typeof value === 'object' ? JSON.stringify(value) : String(value)); return { saved: true }; }
+function propsDelete({ key, scope = 'script' }) { _props(scope).deleteProperty(key); return { deleted: true }; }
+function propsListAll({ scope = 'script' })     { return _props(scope).getProperties(); }
+function _props(scope) {
+  return scope === 'user'     ? PropertiesService.getUserProperties()
+       : scope === 'document' ? PropertiesService.getDocumentProperties()
+       :                        PropertiesService.getScriptProperties();
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  📜  13. LOGGING
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _log(type, action, detail) {
+  try {
+    const ss     = _getOrCreateLogSheet();
+    const sheet  = ss.getSheetByName(CONFIG.LOG_SHEET_NAME) || ss.insertSheet(CONFIG.LOG_SHEET_NAME);
+    if (sheet.getLastRow() === 0) sheet.appendRow(['Timestamp', 'Type', 'Action', 'Detail']);
+    sheet.appendRow([new Date().toISOString(), type, action, JSON.stringify(detail).substring(0, 500)]);
+  } catch (_) { /* fail silently */ }
+}
+
+function _getOrCreateLogSheet() {
+  const key  = 'LOG_SPREADSHEET_ID';
+  let id     = PropertiesService.getScriptProperties().getProperty(key);
+  if (id) try { return SpreadsheetApp.openById(id); } catch (_) {}
+  const ss = SpreadsheetApp.create('AI_Activity_Log_' + new Date().getFullYear());
+  PropertiesService.getScriptProperties().setProperty(key, ss.getId());
+  return ss;
+}
+
+function systemGetLog({ maxRows = 50 }) {
+  const ss    = _getOrCreateLogSheet();
+  const sheet = ss.getSheetByName(CONFIG.LOG_SHEET_NAME);
+  if (!sheet) return { logs: [] };
+  const data  = sheet.getDataRange().getValues();
+  return { logs: data.slice(-maxRows), url: ss.getUrl() };
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🔧  TIỆN ÍCH
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function _json(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+                       .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Chạy hàm này 1 lần để thiết lập Script Properties:
+ * Tools → Script Properties → Add
+ *   AI_API_KEY    = sk-ant-...
+ *   WEBHOOK_CHAT  = https://chat.googleapis.com/v1/spaces/.../messages?key=...
+ */
+function setupProperties() {
+  const props = PropertiesService.getScriptProperties();
+  Logger.log('Current properties: ' + JSON.stringify(props.getProperties()));
+  Logger.log('✅ Setup OK. Add AI_API_KEY and WEBHOOK_CHAT in Project Settings → Script Properties');
+}
+
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  🧪  TEST — Gọi trực tiếp trong Apps Script Editor
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function test_listRoutes() {
+  const result = _dispatch('system.listRoutes', {});
+  Logger.log('Total routes: ' + result.routes.length);
+  Logger.log(result.routes.join('\n'));
+}
+
+function test_fetchURL() {
+  const result = _dispatch('url.fetchJson', { url: 'https://httpbin.org/get' });
+  Logger.log(JSON.stringify(result, null, 2));
+}
+
+function test_listEmails() {
+  const emails = _dispatch('gmail.listEmails', { maxResults: 3 });
+  Logger.log(JSON.stringify(emails, null, 2));
+}
