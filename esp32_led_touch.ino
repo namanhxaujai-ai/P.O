@@ -15,8 +15,8 @@ WebSocketMCP doiTuongMCP;
 WiFiManager quanLyWifi;
 
 // ================== CẤU HÌNH PWM / ĐỘ SÁNG ==================
-const int KENH_PWM_TRANG   = 0;       // chỉ dùng cho core ESP32 2.x
-const int KENH_PWM_VANG    = 1;       // chỉ dùng cho core ESP32 2.x
+const int KENH_PWM_TRANG   = 0;       
+const int KENH_PWM_VANG    = 1;       
 const int TAN_SO_PWM       = 5000; 
 const int DO_PHAN_GIAI_PWM = 12;    
 const int PWM_TOI_DA       = (1 << DO_PHAN_GIAI_PWM) - 1;
@@ -436,10 +436,9 @@ void dangKyCongCuMCP() {
 void setup() {
   Serial.begin(115200);
 
-  khoiTaoPWM();                 // thay cho pinMode(OUTPUT) vì giờ điều khiển độ sáng bằng PWM
+  khoiTaoPWM();                 
   datTrangThaiDen(DEN_TAT);
 
-  // Chân touch KHÔNG cần pinMode / pull-up. Đo giá trị nền ngay (đừng chạm lúc này).
   delay(300);
   hieuChinhCamUng();
 
