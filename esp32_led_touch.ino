@@ -4,9 +4,12 @@
 #include <ArduinoJson.h>
 #include <WiFiMulti.h>       // thử kết nối lần lượt nhiều WiFi đã lưu
 #include <Preferences.h>     // lưu danh sách WiFi vào bộ nhớ flash (NVS)
-#define CHAN_LED_TRANG 25
-#define CHAN_LED_VANG  26
-#define CHAN_CAM_BIEN  33     // T8 - chân touch
+// ===== CHÂN CHO ESP32-S3 SUPERMINI =====
+// Touch trên S3 chỉ có ở GPIO1 -> GPIO14. Tránh các chân strapping (0, 3, 45, 46),
+// chân USB (19, 20) và chân UART (43, 44).
+#define CHAN_LED_TRANG 5      // LED trắng (anode chung)
+#define CHAN_LED_VANG  6      // LED vàng  (anode chung)
+#define CHAN_CAM_BIEN  4      // T4 - chân touch
 
 // ================== CẤU HÌNH MCP ==================
 const char* diaChiMCP = "wss://api.xiaozhi.me/mcp/?token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjgwMzE0MywiYWdlbnRJZCI6MjM1NTQwNywiZW5kcG9pbnRJZCI6ImFnZW50XzIzNTU0MDciLCJwdXJwb3NlIjoibWNwLWVuZHBvaW50IiwiaWF0IjoxNzg5ODg1NzAwLCJleHAiOjE4MjE0NDMzMDB9.cZIiKHG18TDYSRJxGKHDJkTNu9dS-knOmpNshtrcL5XY8bW5HDK3_IAX5cR4ZyBpa-6J6Ejl571FYA1wpR7PIA";
@@ -15,8 +18,8 @@ WebSocketMCP doiTuongMCP;
 WiFiManager quanLyWifi;
 
 // ================== CẤU HÌNH PWM / ĐỘ SÁNG ==================
-const int KENH_PWM_TRANG   = 0;       
-const int KENH_PWM_VANG    = 1;       
+const int KENH_PWM_TRANG   = 0;       // chỉ dùng cho core ESP32 2.x
+const int KENH_PWM_VANG    = 1;       // chỉ dùng cho core ESP32 2.x
 const int TAN_SO_PWM       = 5000; 
 const int DO_PHAN_GIAI_PWM = 12;    
 const int PWM_TOI_DA       = (1 << DO_PHAN_GIAI_PWM) - 1;
@@ -71,6 +74,45 @@ void datTrangThaiDen(TrangThaiDen trangThai) {
 
   const char* ten = (trangThai == DEN_TRANG) ? "TRẮNG" : (trangThai == DEN_VANG) ? "VÀNG" : "TẮT";
   Serial.printf("[LED] Trạng thái: %s | độ sáng: %d%%\n", ten, doSang);
+}
+
+// ================== HIỆU ỨNG "THỞ" KHI CẤU HÌNH WIFI ==================
+// startConfigPortal() chạy chặn (blocking) nên hiệu ứng được chạy trong 1 task riêng.
+const unsigned long CHU_KY_THO_MS   = 2400;  // 1 nhịp sáng-tối mất 2.4 giây
+const int           DO_SANG_THO_MIN = 3;     // độ sáng thấp nhất của nhịp thở (%)
+const int           DO_SANG_THO_MAX = 70;    // độ sáng cao nhất của nhịp thở (%)
+const float         GAMMA_THO       = 2.2f;  // gamma riêng cho hiệu ứng để mắt thấy mượt hơn
+
+volatile bool dangThoCauHinh = false;        // true = yêu cầu task tiếp tục chạy
+volatile bool taskThoDangChay = false;       // true = task còn đang sống
+
+void taskHieuUngTho(void* thamSo) {
+  while (dangThoCauHinh) {
+    float pha = (millis() % CHU_KY_THO_MS) / (float)CHU_KY_THO_MS;   // 0..1
+    float s = (1.0f - cosf(pha * 6.2831853f)) * 0.5f;                // 0..1, đường cong mượt (sin)
+    float phanTram = DO_SANG_THO_MIN + s * (DO_SANG_THO_MAX - DO_SANG_THO_MIN);
+    int duty = (int)(powf(phanTram / 100.0f, GAMMA_THO) * PWM_TOI_DA + 0.5f);
+
+    ghiPWM(CHAN_LED_TRANG, KENH_PWM_TRANG, PWM_TOI_DA - duty);       // anode chung -> đảo duty
+    ghiPWM(CHAN_LED_VANG,  KENH_PWM_VANG,  PWM_TOI_DA);              // đèn vàng giữ tắt
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+  taskThoDangChay = false;
+  vTaskDelete(NULL);
+}
+
+void batDauHieuUngTho() {
+  if (taskThoDangChay) return;
+  dangThoCauHinh = true;
+  taskThoDangChay = true;
+  xTaskCreate(taskHieuUngTho, "tho_led", 3072, NULL, 1, NULL);
+}
+
+void dungHieuUngTho() {
+  dangThoCauHinh = false;
+  unsigned long batDau = millis();
+  while (taskThoDangChay && millis() - batDau < 500) delay(10);   // chờ task tự kết thúc
+  capNhatDen();                                                    // trả đèn về đúng trạng thái hiện tại
 }
 
 // ================== LƯU NHIỀU WIFI ==================
@@ -179,8 +221,10 @@ void dongBoWifiCu() {
 }
 
 // ================== XỬ LÝ CẢM BIẾN CHẠM ==================
-const float TY_LE_KICH_HOAT = 0.75;   // giá trị < 75% nền  -> coi là "chạm"
-const float TY_LE_NHA       = 0.85;   // giá trị > 85% nền  -> coi là "nhả" (hysteresis chống nhiễu)
+// LƯU Ý ESP32-S3: giá trị touch TĂNG khi chạm (ngược với ESP32 thường).
+// Nếu chạm không nhạy / bị nhiễu, đặt IN_DEBUG_CAM_UNG = true rồi chỉnh 2 tỉ lệ này theo giá trị thực tế.
+const float TY_LE_KICH_HOAT = 1.20;   // giá trị > 120% nền -> coi là "chạm"
+const float TY_LE_NHA       = 1.10;   // giá trị < 110% nền -> coi là "nhả" (hysteresis chống nhiễu)
 const bool  IN_DEBUG_CAM_UNG = false; // đặt true để xem giá trị touch trên Serial Monitor cảu Ardino
 
 float giaTriNen = 0;                  // giá trị nền khi không chạm
@@ -226,7 +270,7 @@ void hieuChinhCamUng() {
     delay(10);
   }
   giaTriNen = (float)tong / soMau;
-  Serial.printf("[TOUCH] Giá trị nền: %.1f | ngưỡng chạm < %.1f | ngưỡng nhả > %.1f\n",
+  Serial.printf("[TOUCH] Giá trị nền: %.1f | ngưỡng chạm > %.1f | ngưỡng nhả < %.1f\n",
                 giaTriNen, giaTriNen * TY_LE_KICH_HOAT, giaTriNen * TY_LE_NHA);
 }
 
@@ -246,7 +290,9 @@ void vaoCheDoCauHinhWifi() {
   // KHÔNG xoá WiFi cũ: mạng mới sẽ được THÊM vào danh sách đã lưu.
   // Có thời gian chờ để nếu không cấu hình thì tự quay về các WiFi cũ.
   quanLyWifi.setConfigPortalTimeout(THOI_GIAN_CHO_PORTAL_S);
+  batDauHieuUngTho();   // đèn trắng "thở" nhẹ nhàng suốt thời gian chờ cấu hình
   bool thanhCong = quanLyWifi.startConfigPortal("ESP32-LED-Config"); // tạo Access Point để cấu hình
+  dungHieuUngTho();
 
   if (thanhCong) {
     Serial.println("[WiFi] Đã kết nối mạng mới thành công.");
@@ -324,9 +370,9 @@ void xuLyCamUng() {
 
   float nguongKichHoat = giaTriNen * TY_LE_KICH_HOAT;
   float nguongNha      = giaTriNen * TY_LE_NHA;
-  if (!dangKichHoatTho && giaTri < nguongKichHoat) {
+  if (!dangKichHoatTho && giaTri > nguongKichHoat) {
     dangKichHoatTho = true;
-  } else if (dangKichHoatTho && giaTri > nguongNha) {
+  } else if (dangKichHoatTho && giaTri < nguongNha) {
     dangKichHoatTho = false;
   }
   if (!dangKichHoatTho && !dangKichHoat) {
@@ -436,9 +482,10 @@ void dangKyCongCuMCP() {
 void setup() {
   Serial.begin(115200);
 
-  khoiTaoPWM();                 
+  khoiTaoPWM();                 // thay cho pinMode(OUTPUT) vì giờ điều khiển độ sáng bằng PWM
   datTrangThaiDen(DEN_TAT);
 
+  // Chân touch KHÔNG cần pinMode / pull-up. Đo giá trị nền ngay (đừng chạm lúc này).
   delay(300);
   hieuChinhCamUng();
 
@@ -448,7 +495,9 @@ void setup() {
   bool daKetNoi = (WiFi.status() == WL_CONNECTED) || ketNoiWifiDaLuu(15000);
   if (!daKetNoi && soWifiDaLuu() == 0) {
     quanLyWifi.setConfigPortalTimeout(THOI_GIAN_CHO_PORTAL_S);
+    batDauHieuUngTho();
     daKetNoi = quanLyWifi.autoConnect("ESP32-LED-Config");
+    dungHieuUngTho();
     if (daKetNoi) luuWifi(WiFi.SSID(), WiFi.psk());
   }
 
